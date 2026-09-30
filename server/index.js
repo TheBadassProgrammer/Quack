@@ -1,10 +1,15 @@
-// server/index.js
 const { Server } = require("socket.io");
 const http = require("http");
 
+// Render assigns its own port dynamically via process.env.PORT
+const PORT = process.env.PORT || 3001;
+
 const server = http.createServer();
 const io = new Server(server, {
-  cors: { origin: "http://localhost:3000", methods: ["GET", "POST"] }
+  cors: {
+    origin: "*", // Allows connections from your Vercel frontend
+    methods: ["GET", "POST"],
+  },
 });
 
 const queue = [];
@@ -37,4 +42,7 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3001, () => console.log("Quack signaling server running on port 3001"));
+// Explicitly bind to '0.0.0.0' so Render's internal proxy can detect it
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Quack signaling server running on port ${PORT}`);
+});
