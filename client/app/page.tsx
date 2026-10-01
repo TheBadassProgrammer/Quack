@@ -3,9 +3,11 @@ import { useState, useRef, useEffect } from "react";
 import { io, Socket } from "socket.io-client";
 
 export default function Home() {
+  // Navigation state: 'home' -> 'login' (optional) -> 'chat'
+  const [view, setView] = useState<"home" | "login" | "chat">("home");
+  
   const [email, setEmail] = useState("");
   const [error, setError] = useState("");
-  const [isJoined, setIsJoined] = useState(false);
   const [domain, setDomain] = useState("");
   const [status, setStatus] = useState("Idle");
 
@@ -15,6 +17,7 @@ export default function Home() {
   const socket = useRef<Socket | null>(null);
   const currentRoom = useRef<string | null>(null);
 
+  // Handle college email login
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     const parts = email.split("@");
@@ -26,20 +29,25 @@ export default function Home() {
     
     setError("");
     setDomain(parts[1].toLowerCase());
-    setIsJoined(true);
+    setView("chat");
+  };
+
+  // Handle direct global entry
+  const handleGlobalChat = () => {
+    setDomain("global");
+    setView("chat");
   };
 
   useEffect(() => {
-    if (!isJoined) return;
+    if (view !== "chat") return;
 
-    // Connect to the local signaling server
+    // Connect to signaling server
     socket.current = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:3001");
 
     pc.current = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
-    // Request camera and microphone access
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
@@ -61,7 +69,6 @@ export default function Home() {
       }
     };
 
-    // Listen for matchmaking and WebRTC handshakes
     socket.current.on("match_found", async ({ roomId, initiate }: { roomId: string; initiate: boolean }) => {
       currentRoom.current = roomId;
       setStatus("Connected");
@@ -92,23 +99,62 @@ export default function Home() {
       socket.current?.disconnect();
       pc.current?.close();
     };
-  }, [isJoined]);
+  }, [view]);
 
   const handleFindMatch = () => {
     setStatus("Searching for a peer...");
+    if (remoteVideo.current) remoteVideo.current.srcObject = null; // Clear old video
     socket.current?.emit("join_queue", { domain });
   };
 
-  if (!isJoined) {
+  // --- RENDER 1: HOME SELECTION SCREEN ---
+  if (view === "home") {
     return (
       <main className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
-        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
-          <div className="flex items-center justify-center gap-3 mb-6">
+        <div className="max-w-md w-full flex flex-col gap-6 items-center">
+          <div className="flex flex-col items-center gap-2 mb-4">
+            <span className="text-6xl mb-2">🦆</span>
+            <h1 className="text-5xl font-black tracking-tight text-amber-400">Quack</h1>
+            <p className="text-slate-400 text-center text-sm">Choose your connection mode.</p>
+          </div>
+          
+          <button
+            onClick={handleGlobalChat}
+            className="w-full py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-2xl flex flex-col items-center justify-center gap-1 transition duration-200"
+          >
+            <span className="font-bold text-lg text-white">Start Talking</span>
+            <span className="text-xs text-slate-400">Talk to anyone in the world. No login required.</span>
+          </button>
+
+          <button
+            onClick={() => setView("login")}
+            className="w-full py-4 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-2xl flex flex-col items-center justify-center gap-1 transition duration-200 shadow-lg shadow-amber-400/20"
+          >
+            <span className="font-bold text-lg">Talk to a College Peer</span>
+            <span className="text-xs text-slate-800 font-medium">Verify your university email to join.</span>
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // --- RENDER 2: COLLEGE LOGIN SCREEN ---
+  if (view === "login") {
+    return (
+      <main className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
+        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative">
+          <button 
+            onClick={() => setView("home")}
+            className="absolute top-4 left-4 text-slate-400 hover:text-white text-sm"
+          >
+            &larr; Back
+          </button>
+          <div className="flex items-center justify-center gap-3 mb-6 mt-4">
             <span className="text-4xl">🦆</span>
-            <h1 className="text-3xl font-black tracking-tight text-amber-400">Quack</h1>
+            <h2 className="text-2xl font-black tracking-tight text-amber-400">College Peers</h2>
           </div>
           <p className="text-slate-400 text-center mb-6 text-sm">
-            Intra-college video chat. Connect exclusively with students from your campus.
+            Enter your student email. You will only be matched with others from your campus.
           </p>
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
             <div>
@@ -129,7 +175,7 @@ export default function Home() {
               type="submit"
               className="w-full py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl transition duration-200"
             >
-              Enter Lobby
+              Enter Campus Lobby
             </button>
           </form>
         </div>
@@ -137,15 +183,21 @@ export default function Home() {
     );
   }
 
+  // --- RENDER 3: VIDEO CHAT INTERFACE ---
   return (
     <main className="min-h-screen bg-slate-950 text-white p-6 flex flex-col items-center justify-between">
       <header className="w-full max-w-5xl flex justify-between items-center mb-4">
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">🦆</span>
-          <span className="font-bold text-amber-400 text-xl">Quack</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">🦆</span>
+            <span className="font-bold text-amber-400 text-xl">Quack</span>
+          </div>
+          <button onClick={() => setView("home")} className="text-xs text-slate-400 hover:text-white bg-slate-900 px-3 py-1 rounded-md">
+            Leave Room
+          </button>
         </div>
-        <span className="text-xs font-mono bg-slate-800 px-3 py-1 rounded-full text-slate-300 border border-slate-700">
-          Domain: {domain}
+        <span className="text-xs font-mono bg-slate-800 px-3 py-1 rounded-full text-slate-300 border border-slate-700 uppercase tracking-wider">
+          {domain === "global" ? "Global Network" : `Campus: ${domain}`}
         </span>
       </header>
 
