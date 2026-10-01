@@ -1,6 +1,8 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { io, Socket } from "socket.io-client";
+import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
+import { jwtDecode } from "jwt-decode";
 
 export default function Home() {
   const [view, setView] = useState<"home" | "login" | "otp" | "chat">("home");
@@ -16,7 +18,6 @@ export default function Home() {
   const socket = useRef<Socket | null>(null);
   const currentRoom = useRef<string | null>(null);
 
-  // 1. Initialize socket and check for persistent login
   useEffect(() => {
     const savedDomain = localStorage.getItem("quack_domain");
     if (savedDomain) {
@@ -27,7 +28,27 @@ export default function Home() {
     return () => { socket.current?.disconnect(); };
   }, []);
 
-  // 2. Auth Flow: Request OTP
+  // --- GOOGLE AUTH HANDLER ---
+  const handleGoogleSuccess = (credentialResponse: any) => {
+    if (credentialResponse.credential) {
+      const decoded: any = jwtDecode(credentialResponse.credential);
+      const userEmail = decoded.email;
+      const parts = userEmail.split("@");
+      
+      if (parts.length !== 2 || (!parts[1].endsWith(".edu") && !parts[1].endsWith(".ac.in"))) {
+        setError("Please use a valid college Google account (.edu or .ac.in)");
+        return;
+      }
+      
+      setError("");
+      const userDomain = parts[1].toLowerCase();
+      localStorage.setItem("quack_domain", userDomain);
+      setDomain(userDomain);
+      setView("chat");
+    }
+  };
+
+  // --- OTP AUTH HANDLERS ---
   const handleRequestOtp = (e: React.FormEvent) => {
     e.preventDefault();
     const parts = email.split("@");
@@ -35,19 +56,18 @@ export default function Home() {
       setError("Please use a valid college email (.edu or .ac.in)");
       return;
     }
+    if (!socket.current?.connected) {
+      setError("Connecting to server... Please wait a few seconds and try again.");
+      return;
+    }
     setError("");
     socket.current?.emit("request_otp", { email });
-    
-    socket.current?.once("otp_sent", () => {
-      setView("otp");
-    });
+    socket.current?.once("otp_sent", () => setView("otp"));
   };
 
-  // 3. Auth Flow: Verify OTP
   const handleVerifyOtp = (e: React.FormEvent) => {
     e.preventDefault();
     socket.current?.emit("verify_otp", { email, code: otp });
-
     socket.current?.once("otp_verified", (res: { success: boolean; domain?: string; error?: string }) => {
       if (res.success && res.domain) {
         localStorage.setItem("quack_domain", res.domain);
@@ -74,10 +94,9 @@ export default function Home() {
     setView("chat");
   };
 
-  // 4. WebRTC Setup (Only runs when in 'chat' view)
+  // --- WEBRTC SETUP ---
   useEffect(() => {
     if (view !== "chat" || !socket.current) return;
-
     pc.current = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
 
     navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
@@ -128,6 +147,7 @@ export default function Home() {
     socket.current?.emit("join_queue", { domain });
   };
 
+  // --- RENDERS ---
   if (view === "home") {
     return (
       <main className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
@@ -161,16 +181,34 @@ export default function Home() {
           </div>
           
           {view === "login" ? (
-            <form onSubmit={handleRequestOtp} className="flex flex-col gap-4">
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourcollege.edu" required className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 text-sm" />
-              {error && <p className="text-red-400 text-xs">{error}</p>}
-              <button type="submit" className="w-full py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl transition">Send Code</button>
-            </form>
+            <div className="flex flex-col gap-4">
+              <GoogleOAuthProvider clientId={process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ""}>
+                <div className="flex justify-center w-full">
+                  <GoogleLogin 
+                    onSuccess={handleGoogleSuccess} 
+                    onError={() => setError("Google Login Failed")}
+                    useOneTap
+                  />
+                </div>
+              </GoogleOAuthProvider>
+
+              <div className="flex items-center gap-2 my-2">
+                <div className="h-px bg-slate-800 flex-1"></div>
+                <span className="text-xs text-slate-500 font-medium uppercase tracking-widest">OR</span>
+                <div className="h-px bg-slate-800 flex-1"></div>
+              </div>
+
+              <form onSubmit={handleRequestOtp} className="flex flex-col gap-4">
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourcollege.edu" required className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 text-sm" />
+                {error && <p className="text-red-400 text-xs text-center">{error}</p>}
+                <button type="submit" className="w-full py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl transition">Send Code</button>
+              </form>
+            </div>
           ) : (
             <form onSubmit={handleVerifyOtp} className="flex flex-col gap-4">
               <p className="text-slate-400 text-xs text-center">We sent a 6-digit code to {email}</p>
               <input type="text" value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="123456" required maxLength={6} className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 text-center tracking-[0.5em] text-lg font-mono" />
-              {error && <p className="text-red-400 text-xs">{error}</p>}
+              {error && <p className="text-red-400 text-xs text-center">{error}</p>}
               <button type="submit" className="w-full py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl transition">Verify & Enter</button>
             </form>
           )}
