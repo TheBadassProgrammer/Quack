@@ -17,13 +17,13 @@ export default function Home() {
 
   const localVideo = useRef<HTMLVideoElement>(null);
   const remoteVideo = useRef<HTMLVideoElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   
-  // WebRTC & Networking Refs
   const pc = useRef<RTCPeerConnection | null>(null);
   const socket = useRef<Socket | null>(null);
   const currentRoom = useRef<string | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
-  const localStream = useRef<MediaStream | null>(null); // Keeps camera on between matches
+  const localStream = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     const savedDomain = localStorage.getItem("quack_domain");
@@ -35,7 +35,10 @@ export default function Home() {
     return () => { socket.current?.disconnect(); };
   }, []);
 
-  // --- AUTH HANDLERS ---
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
   const handleGoogleSuccess = (credentialResponse: any) => {
     if (credentialResponse.credential) {
       const decoded: any = jwtDecode(credentialResponse.credential);
@@ -96,11 +99,9 @@ export default function Home() {
     pc.current?.close();
   };
 
-  // --- WEBRTC CORE LOGIC ---
   useEffect(() => {
     if (view !== "chat" || !socket.current) return;
 
-    // 1. Get Camera once when entering the room
     if (!localStream.current) {
       navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
         localStream.current = stream;
@@ -108,13 +109,10 @@ export default function Home() {
       }).catch(console.error);
     }
 
-    // 2. Helper to build a completely fresh WebRTC Connection
     const createPeerConnection = () => {
-      if (pc.current) pc.current.close(); // Destroy old connection entirely
-      
+      if (pc.current) pc.current.close();
       const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
 
-      // Add local media tracks
       if (localStream.current) {
         localStream.current.getTracks().forEach((track) => peer.addTrack(track, localStream.current!));
       }
@@ -139,7 +137,6 @@ export default function Home() {
       return peer;
     };
 
-    // 3. Socket Event Listeners
     const onMatchFound = async ({ roomId, initiate }: { roomId: string, initiate: boolean }) => {
       currentRoom.current = roomId;
       setStatus("Connected");
@@ -190,26 +187,21 @@ export default function Home() {
     setStatus("Searching...");
     setMessages([]);
     if (remoteVideo.current) remoteVideo.current.srcObject = null;
-    
-    // Purge the old connection instantly so no cross-peer data leaks
     if (pc.current) {
       pc.current.close();
       pc.current = null;
     }
-    
     socket.current?.emit("join_queue", { domain });
   };
 
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || !dataChannel.current || dataChannel.current.readyState !== "open") return;
-    
     dataChannel.current.send(chatInput);
     setMessages((prev) => [...prev, { sender: "me", text: chatInput }]);
     setChatInput("");
   };
 
-  // --- RENDERS ---
   if (view === "home") {
     return (
       <main className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
@@ -274,73 +266,109 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-white p-4 md:p-6 flex flex-col items-center">
-      <header className="w-full max-w-6xl flex justify-between items-center mb-6">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-2xl">🦆</span>
-            <span className="font-bold text-amber-400 text-xl hidden sm:block">Quack</span>
+    <main className="h-[100dvh] bg-slate-950 text-white flex flex-col overflow-hidden relative">
+      
+      {/* HEADER */}
+      <header className="absolute top-0 left-0 w-full z-40 lg:static lg:w-full lg:max-w-7xl lg:mx-auto flex justify-between items-center p-3 lg:p-6 shrink-0 bg-gradient-to-b from-black/80 to-transparent lg:bg-none pointer-events-none">
+        <div className="flex items-center gap-2 md:gap-4 pointer-events-auto">
+          <div className="flex items-center gap-1 md:gap-2">
+            <span className="text-xl md:text-2xl">🦆</span>
+            <span className="font-bold text-amber-400 text-lg md:text-xl hidden sm:block drop-shadow-md lg:drop-shadow-none">Quack</span>
           </div>
-          <button onClick={handleLogout} className="text-xs text-slate-400 hover:text-white bg-slate-900 px-3 py-1.5 rounded-md border border-slate-700">
+          <button onClick={handleLogout} className="text-[10px] md:text-xs text-slate-200 lg:text-slate-400 hover:text-white bg-slate-900/80 lg:bg-slate-900 px-2 py-1 md:px-3 md:py-1.5 rounded-md border border-slate-700 backdrop-blur-md lg:backdrop-blur-none">
             {domain === "global" ? "Leave Room" : "Log Out"}
           </button>
         </div>
-        <div className="flex items-center gap-4">
-          <button onClick={handleFindMatch} className="px-6 py-1.5 text-sm bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-full transition shadow-lg shadow-amber-400/20">
+        <div className="flex items-center gap-2 md:gap-4 pointer-events-auto">
+          <button onClick={handleFindMatch} className="px-4 py-1.5 md:px-6 md:py-1.5 text-[11px] md:text-sm bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-full transition shadow-lg shadow-amber-400/20">
             Next Peer
           </button>
-          <span className="text-xs font-mono bg-slate-800 px-3 py-1.5 rounded-full text-slate-300 border border-slate-700 uppercase tracking-wider hidden md:block">
-            {domain === "global" ? "Global Network" : `Campus: ${domain}`}
+          <span className="text-[9px] md:text-xs font-mono bg-slate-900/80 lg:bg-slate-800 px-2 py-1 md:px-3 md:py-1.5 rounded-full text-slate-200 lg:text-slate-300 border border-slate-700 uppercase tracking-wider hidden md:block backdrop-blur-md lg:backdrop-blur-none">
+            {domain === "global" ? "Global" : `Campus: ${domain}`}
           </span>
         </div>
       </header>
 
-      <div className="w-full max-w-6xl flex flex-col-reverse lg:flex-row gap-6 h-[75vh]">
-        <div className="w-full lg:w-1/3 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col overflow-hidden h-[40vh] lg:h-full shrink-0 shadow-2xl">
-          <div className="p-4 bg-slate-950/50 border-b border-slate-800 flex justify-between items-center">
-            <span className="font-bold text-amber-400">Live Chat</span>
-            <span className={`text-xs px-2 py-1 rounded-md ${status === "Connected" ? "bg-green-500/20 text-green-400" : "bg-slate-800 text-slate-400"}`}>
+      {/* MAIN CONTENT AREA */}
+      <div className="w-full h-full lg:max-w-7xl lg:mx-auto flex flex-col lg:flex-row lg:gap-6 lg:p-6 lg:pt-0 flex-1 min-h-0 relative">
+        
+        {/* VIDEOS */}
+        <div 
+          className="relative flex-1 w-full h-full bg-black lg:rounded-2xl overflow-hidden shadow-2xl cursor-pointer lg:cursor-default"
+          onClick={() => {
+            if (window.innerWidth < 1024 && document.activeElement instanceof HTMLElement) {
+              document.activeElement.blur();
+            }
+          }}
+        >
+          <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-cover" />
+          
+          <span className="absolute top-16 left-3 lg:top-auto lg:left-4 lg:bottom-4 bg-slate-950/60 lg:bg-slate-950/80 px-2.5 py-1 lg:px-3 lg:py-1.5 rounded-md lg:rounded-lg text-[10px] lg:text-xs font-medium backdrop-blur-md shadow-xl border border-slate-800/50 z-20">
+            Peer ({status})
+          </span>
+
+          <div className="absolute bottom-20 right-3 lg:bottom-auto lg:right-auto lg:top-4 lg:left-4 w-24 md:w-32 lg:w-48 aspect-[3/4] bg-slate-950 border border-slate-700/50 lg:border-slate-700 rounded-lg lg:rounded-xl overflow-hidden shadow-2xl z-20 pointer-events-none">
+            <video ref={localVideo} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
+            <span className="absolute bottom-1.5 left-1.5 lg:bottom-2 lg:left-2 bg-slate-950/60 lg:bg-slate-950/80 px-1.5 py-0.5 lg:px-2 lg:py-1 rounded-md text-[9px] lg:text-[10px] font-medium backdrop-blur-md border border-slate-800/50">
+              You
+            </span>
+          </div>
+        </div>
+
+        {/* CHAT AREA: Changed h-[60%] to h-[30%] on mobile */}
+        <div className="absolute bottom-0 left-0 w-full h-[30%] lg:h-full lg:static z-30 flex flex-col justify-end lg:justify-start bg-gradient-to-t from-black/90 via-black/40 to-transparent pointer-events-none lg:pointer-events-auto lg:w-80 xl:w-96 shrink-0 lg:bg-none lg:bg-slate-900 lg:border lg:border-slate-800 lg:rounded-2xl lg:shadow-2xl lg:overflow-hidden">
+          
+          <div className="hidden lg:flex p-3 md:p-4 bg-slate-950/50 border-b border-slate-800 justify-between items-center shrink-0">
+            <span className="font-bold text-amber-400 text-sm md:text-base">Live Chat</span>
+            <span className={`text-[10px] md:text-xs px-2 py-1 rounded-md ${status === "Connected" ? "bg-green-500/20 text-green-400" : "bg-slate-800 text-slate-400"}`}>
               {status}
             </span>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-            {messages.length === 0 && (
-              <p className="text-slate-500 text-xs text-center my-auto">Messages will appear here when connected.</p>
-            )}
+          
+          {/* Scrollable Messages Area */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 lg:p-4 flex flex-col gap-1.5 lg:gap-3 w-full pointer-events-auto no-scrollbar mask-image-to-top">
+            
             {messages.map((m, i) => (
-              <div key={i} className={`px-4 py-2 rounded-2xl max-w-[85%] text-sm ${
-                m.sender === "me" ? "bg-amber-400 text-slate-950 self-end rounded-br-sm" : "bg-slate-800 text-white self-start rounded-bl-sm border border-slate-700"
-              }`}>
-                {m.text}
+              <div key={i} className={`flex w-full lg:w-fit lg:max-w-[85%] ${m.sender === "me" ? "lg:self-end" : "lg:self-start"}`}>
+                
+                {/* Mobile View */}
+                <div className="lg:hidden text-[13px] leading-snug break-words max-w-[50%] drop-shadow-md text-white/90">
+                  <span className="font-bold mr-1">
+                    {m.sender === "me" ? "You:" : "Peer:"}
+                  </span>
+                  {m.text}
+                </div>
+
+                {/* PC View */}
+                <div className={`
+                  hidden lg:block text-sm leading-snug break-words
+                  ${m.sender === "me" 
+                    ? "text-slate-950 bg-amber-400 px-3 py-2 rounded-2xl rounded-br-sm drop-shadow-none" 
+                    : "text-white bg-slate-800 px-3 py-2 rounded-2xl rounded-bl-sm border border-slate-700 drop-shadow-none"
+                  }
+                `}>
+                  {m.text}
+                </div>
+
               </div>
             ))}
+            
+            <div ref={messagesEndRef} className="h-px shrink-0" />
           </div>
-          <form onSubmit={sendMessage} className="p-3 border-t border-slate-800 flex gap-2 bg-slate-900/50">
+
+          {/* Input Form */}
+          <form onSubmit={sendMessage} className="p-3 lg:p-3 lg:border-t lg:border-slate-800 flex gap-2 lg:bg-slate-900/50 shrink-0 pointer-events-auto">
             <input 
               type="text" value={chatInput} onChange={e => setChatInput(e.target.value)} disabled={status !== "Connected"}
-              placeholder={status === "Connected" ? "Type a message..." : "Waiting for peer..."}
-              className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
+              placeholder={status === "Connected" ? "send a message" : "Waiting..."}
+              className="flex-1 bg-black/40 lg:bg-slate-950 border border-white/20 lg:border-slate-700 rounded-full lg:rounded-xl px-4 py-2.5 text-xs lg:text-sm focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50 text-white backdrop-blur-sm lg:backdrop-blur-none"
             />
-            <button type="submit" disabled={status !== "Connected" || !chatInput.trim()} className="bg-amber-400 hover:bg-amber-300 text-slate-950 px-5 py-2.5 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed transition">
+            <button type="submit" disabled={status !== "Connected" || !chatInput.trim()} className="bg-transparent lg:bg-amber-400 text-white lg:text-slate-950 px-3 lg:px-4 py-2.5 rounded-full lg:rounded-xl text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed transition hover:opacity-80">
               Send
             </button>
           </form>
         </div>
 
-        <div className="w-full lg:w-2/3 flex flex-col gap-4">
-          <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex-1 flex items-center justify-center shadow-2xl">
-            <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-cover" />
-            <span className="absolute bottom-4 left-4 bg-slate-950/80 px-3 py-1.5 rounded-lg text-xs font-medium backdrop-blur-md shadow-xl border border-slate-800/50">
-              Peer ({status})
-            </span>
-          </div>
-          <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden h-32 md:h-56 shrink-0 flex items-center justify-center shadow-2xl">
-            <video ref={localVideo} autoPlay muted playsInline className="w-full h-full object-cover" />
-            <span className="absolute bottom-4 left-4 bg-slate-950/80 px-3 py-1.5 rounded-lg text-xs font-medium backdrop-blur-md shadow-xl border border-slate-800/50">
-              You
-            </span>
-          </div>
-        </div>
       </div>
     </main>
   );
