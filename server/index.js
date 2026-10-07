@@ -25,7 +25,7 @@ const transporter = nodemailer.createTransport({
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  // --- 1. USER REGISTRATION WITH ACKNOWLEDGMENT & ERROR SAFETY ---
+  // --- 1. USER REGISTRATION WITH ACKNOWLEDGMENT ---
   socket.on("register_user", async ({ email, domain }, callback) => {
     try {
       let user = await prisma.user.findUnique({ where: { email } });
@@ -122,6 +122,23 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("fetch_messages", async ({ userId, peerId }) => {
+    try {
+      const messages = await prisma.message.findMany({
+        where: {
+          OR: [
+            { senderId: userId, receiverId: peerId },
+            { senderId: peerId, receiverId: userId }
+          ]
+        },
+        orderBy: { createdAt: "asc" }
+      });
+      socket.emit("message_history", messages);
+    } catch (error) {
+      console.error("Fetch messages error:", error);
+    }
+  });
+
   socket.on("send_dm", async ({ senderId, receiverId, text }) => {
     try {
       const message = await prisma.message.create({
@@ -132,6 +149,8 @@ io.on("connection", (socket) => {
       if (receiverSocketId) {
         io.to(receiverSocketId).emit("receive_dm", message);
       }
+      // Also echo back to sender socket so UI updates instantly
+      socket.emit("receive_dm", message);
     } catch (error) {
       console.error("Send DM database error:", error);
     }

@@ -5,7 +5,7 @@ import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
 import { jwtDecode } from "jwt-decode";
 
 export default function Home() {
-  const [view, setView] = useState<"home" | "login" | "otp" | "chat">("home");
+  const [view, setView] = useState<"home" | "login" | "otp" | "chat" | "inbox">("home");
   const [authMode, setAuthMode] = useState<"college" | "global">("college");
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
@@ -13,10 +13,14 @@ export default function Home() {
   const [domain, setDomain] = useState("");
   const [status, setStatus] = useState("Idle");
   
-  // Persistent DB User IDs & Friendship
+  // Persistent DB User IDs, Friendship & Inbox State
   const [myUserId, setMyUserId] = useState<string | null>(null);
   const [peerUserId, setPeerUserId] = useState<string | null>(null);
   const [friendState, setFriendState] = useState<"none" | "sent" | "received" | "friends">("none");
+  const [friends, setFriends] = useState<any[]>([]);
+  const [selectedFriend, setSelectedFriend] = useState<any | null>(null);
+  const [dmMessages, setDmMessages] = useState<any[]>([]);
+  const [dmInput, setDmInput] = useState("");
 
   const [messages, setMessages] = useState<{sender: "me" | "peer", text: string}[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -31,7 +35,6 @@ export default function Home() {
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const localStream = useRef<MediaStream | null>(null);
 
-  // Restore session from localStorage and auto-re-register on socket connection
   useEffect(() => {
     const savedDomain = localStorage.getItem("quack_domain");
     const savedUserId = localStorage.getItem("quack_userId");
@@ -43,7 +46,6 @@ export default function Home() {
       setMyUserId(savedUserId);
       setEmail(savedEmail);
       if (savedAuthMode) setAuthMode(savedAuthMode);
-      setView("chat");
     }
     
     socket.current = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:3001");
@@ -63,10 +65,39 @@ export default function Home() {
       setError(error);
     });
 
+    socket.current.on("friends_list", (list) => {
+      setFriends(list);
+    });
+
+    socket.current.on("message_history", (history) => {
+      setDmMessages(history);
+    });
+
+    socket.current.on("receive_dm", (message) => {
+      setDmMessages((prev) => {
+        // Prevent duplicate appending if message is already listed
+        if (prev.some((m) => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+    });
+
     return () => { socket.current?.disconnect(); };
   }, []);
 
-  // Transmit identity as soon as data channel opens & myUserId is ready
+  // Fetch friends list when entering home view
+  useEffect(() => {
+    if (view === "home" && myUserId && socket.current) {
+      socket.current.emit("fetch_friends", { userId: myUserId });
+    }
+  }, [view, myUserId]);
+
+  // Fetch message history when a friend is selected in inbox
+  useEffect(() => {
+    if (selectedFriend && myUserId && socket.current) {
+      socket.current.emit("fetch_messages", { userId: myUserId, peerId: selectedFriend.id });
+    }
+  }, [selectedFriend, myUserId]);
+
   useEffect(() => {
     if (myUserId && dataChannel.current && dataChannel.current.readyState === "open") {
       dataChannel.current.send(JSON.stringify({ type: "IDENTITY", userId: myUserId }));
@@ -75,7 +106,7 @@ export default function Home() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, dmMessages]);
 
   // --- AUTH HANDLERS ---
   const handleGoogleSuccess = (credentialResponse: any) => {
@@ -103,7 +134,7 @@ export default function Home() {
           
           setDomain(userDomain);
           setMyUserId(res.userId);
-          setView("chat");
+          setView("home");
         } else {
           setError("Failed to register user in database.");
         }
@@ -145,7 +176,7 @@ export default function Home() {
             
             setDomain(userDomain);
             setMyUserId(ackRes.userId);
-            setView("chat");
+            setView("home");
           } else {
             setError("Failed to register user in database.");
           }
@@ -172,6 +203,42 @@ export default function Home() {
     pc.current?.close();
   };
 
+  const handleLeaveRoom = () => {
+    if (remoteVideo.current) remoteVideo.current.srcObject = null;
+    if (localStream.current) {
+      localStream.current.getTracks().forEach(track => track.stop());
+      localStream.current = null;
+    }
+    pc.current?.close();
+    setMessages([]);
+    setStatus("Idle");
+    setView("home");
+  };
+
+  const handleSendDm = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dmInput.trim() || !selectedFriend || !myUserId) return;
+
+    const textToSend = dmInput;
+    setDmInput("");
+
+    // Optimistically add message to UI immediately
+    const optimisticMsg = {
+      id: "temp_" + Date.now(),
+      senderId: myUserId,
+      receiverId: selectedFriend.id,
+      text: textToSend,
+      createdAt: new Date().toISOString()
+    };
+    setDmMessages((prev) => [...prev, optimisticMsg]);
+
+    socket.current?.emit("send_dm", {
+      senderId: myUserId,
+      receiverId: selectedFriend.id,
+      text: textToSend
+    });
+  };
+
   // --- WEBRTC & FRIEND HANDSHAKE ---
   const handleDataChannelMessage = (dataString: string) => {
     try {
@@ -186,6 +253,7 @@ export default function Home() {
           if (prev === "sent") {
             if (myUserId && payload.userId) {
               socket.current?.emit("add_friend", { myId: myUserId, peerId: payload.userId });
+              socket.current?.emit("fetch_friends", { userId: myUserId });
             }
             return "friends";
           }
@@ -209,6 +277,7 @@ export default function Home() {
 
     if (nextState === "friends" && myUserId && peerUserId) {
       socket.current?.emit("add_friend", { myId: myUserId, peerId: peerUserId });
+      socket.current?.emit("fetch_friends", { userId: myUserId });
     }
   };
 
@@ -326,7 +395,165 @@ export default function Home() {
     setChatInput("");
   };
 
+  // --- WHATSAPP DM INBOX VIEW ---
+  if (view === "inbox") {
+    return (
+      <main className="h-[100dvh] w-full bg-slate-950 text-white flex overflow-hidden">
+        {/* Left Sidebar: Chat List */}
+        <div className="w-full md:w-80 lg:w-96 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0">
+          <div className="p-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button onClick={() => setView("home")} className="text-amber-400 hover:text-amber-300 text-sm font-bold">&larr; Back</button>
+              <h2 className="font-bold text-amber-400 text-lg">Chats</h2>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
+            {friends.length === 0 ? (
+              <p className="text-xs text-slate-500 text-center py-12">No friends yet. Connect and add peers in video chat!</p>
+            ) : (
+              friends.map((f) => (
+                <div 
+                  key={f.id}
+                  onClick={() => setSelectedFriend(f)}
+                  className={`flex items-center gap-3 p-3.5 rounded-xl cursor-pointer transition ${selectedFriend?.id === f.id ? "bg-slate-800 border border-slate-700" : "hover:bg-slate-800/50"}`}
+                >
+                  <div className="w-10 h-10 rounded-full bg-amber-400/20 text-amber-400 font-bold flex items-center justify-center shrink-0">
+                    {f.email[0].toUpperCase()}
+                  </div>
+                  <div className="flex flex-col flex-1 min-w-0">
+                    <span className="text-sm font-semibold truncate text-white">{f.email}</span>
+                    <span className="text-[11px] text-slate-400 truncate">Domain: {f.domain}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Right Main Panel: Active DM Chat */}
+        <div className="hidden md:flex flex-1 flex-col bg-slate-950 h-full">
+          {selectedFriend ? (
+            <>
+              {/* Chat Header */}
+              <div className="p-4 bg-slate-900 border-b border-slate-800 flex items-center gap-3 shrink-0">
+                <div className="w-9 h-9 rounded-full bg-amber-400/20 text-amber-400 font-bold flex items-center justify-center">
+                  {selectedFriend.email[0].toUpperCase()}
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-bold text-sm text-white">{selectedFriend.email}</span>
+                  <span className="text-[10px] text-green-400 font-medium">Online</span>
+                </div>
+              </div>
+
+              {/* Messages List */}
+              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
+                {dmMessages.length === 0 ? (
+                  <div className="m-auto text-center text-slate-500 text-xs">
+                    <p>No messages with {selectedFriend.email} yet.</p>
+                    <p className="mt-1">Send a message to start the conversation!</p>
+                  </div>
+                ) : (
+                  dmMessages.map((m, idx) => {
+                    const isMe = String(m.senderId) === String(myUserId);
+                    return (
+                      <div key={idx} className={`flex w-full ${isMe ? "justify-end" : "justify-start"}`}>
+                        <div className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${isMe ? "bg-amber-400 text-slate-950 rounded-br-sm font-medium" : "bg-slate-800 text-white border border-slate-700 rounded-bl-sm"}`}>
+                          {m.text}
+                          <div className={`text-[9px] mt-1 text-right ${isMe ? "text-slate-800" : "text-slate-400"}`}>
+                            {new Date(m.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Message Input Form */}
+              <form onSubmit={handleSendDm} className="p-4 bg-slate-900 border-t border-slate-800 flex gap-3 shrink-0">
+                <input 
+                  type="text" 
+                  value={dmInput} 
+                  onChange={(e) => setDmInput(e.target.value)} 
+                  placeholder="Type a message..." 
+                  className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+                <button type="submit" className="bg-amber-400 text-slate-950 px-6 py-3 rounded-xl font-bold hover:bg-amber-300 transition shadow-lg shadow-amber-400/20">
+                  Send
+                </button>
+              </form>
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-slate-500 gap-2">
+              <span className="text-5xl">💬</span>
+              <p className="text-sm font-medium">Select a chat from the left sidebar to start messaging</p>
+            </div>
+          )}
+        </div>
+      </main>
+    );
+  }
+
+  // --- HOMESCREEN DASHBOARD VIEW ---
   if (view === "home") {
+    if (myUserId) {
+      return (
+        <main className="min-h-screen w-full bg-slate-950 text-white flex flex-col p-6 md:p-10">
+          <header className="w-full max-w-5xl mx-auto flex justify-between items-center py-4 border-b border-slate-800 mb-8">
+            <div className="flex items-center gap-3">
+              <span className="text-4xl">🦆</span>
+              <div>
+                <h1 className="text-2xl font-black text-amber-400">Quack Dashboard</h1>
+                <p className="text-xs text-slate-400">{email}</p>
+              </div>
+            </div>
+            <button 
+              onClick={handleLogout} 
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl border border-slate-700 transition"
+            >
+              Log Out
+            </button>
+          </header>
+
+          <div className="w-full max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Start Video Chat Section */}
+            <div className="flex flex-col gap-4">
+              <h2 className="text-lg font-bold text-slate-300">Start Video Chat</h2>
+              <button 
+                onClick={() => { setDomain("global"); setView("chat"); }} 
+                className="w-full py-5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-2xl flex flex-col items-center justify-center gap-1 transition shadow-lg"
+              >
+                <span className="font-bold text-lg text-white">Global Chat</span>
+                <span className="text-xs text-slate-400">Talk to anyone worldwide.</span>
+              </button>
+              <button 
+                onClick={() => { setDomain(localStorage.getItem("quack_domain") || "college"); setView("chat"); }} 
+                className="w-full py-5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-2xl flex flex-col items-center justify-center gap-1 transition shadow-lg shadow-amber-400/20"
+              >
+                <span className="font-bold text-lg">College Peer Chat</span>
+                <span className="text-xs text-slate-800 font-medium">Talk with verified university peers.</span>
+              </button>
+            </div>
+
+            {/* Inbox Access Section */}
+            <div className="flex flex-col gap-4 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-amber-400 mb-2">Direct Messages</h2>
+                <p className="text-xs text-slate-400">Open your inbox to chat with your saved friends and view connection history.</p>
+              </div>
+              <button 
+                onClick={() => setView("inbox")}
+                className="w-full py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold rounded-xl transition flex items-center justify-center gap-2"
+              >
+                <span>📬</span> Open Inbox ({friends.length})
+              </button>
+            </div>
+          </div>
+        </main>
+      );
+    }
+
     return (
       <main className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
         <div className="max-w-md w-full flex flex-col gap-6 items-center">
@@ -406,6 +633,7 @@ export default function Home() {
     );
   }
 
+  // --- VIDEO CHAT VIEW ---
   return (
     <main className="h-[100dvh] bg-slate-950 text-white flex flex-col overflow-hidden relative">
       
@@ -416,8 +644,8 @@ export default function Home() {
             <span className="text-xl md:text-2xl">🦆</span>
             <span className="font-bold text-amber-400 text-lg md:text-xl hidden sm:block drop-shadow-md lg:drop-shadow-none">Quack</span>
           </div>
-          <button onClick={handleLogout} className="text-[10px] md:text-xs text-slate-200 lg:text-slate-400 hover:text-white bg-slate-900/80 lg:bg-slate-900 px-2 py-1 md:px-3 md:py-1.5 rounded-md border border-slate-700 backdrop-blur-md lg:backdrop-blur-none">
-            Log Out
+          <button onClick={handleLeaveRoom} className="text-[10px] md:text-xs text-slate-200 lg:text-slate-400 hover:text-white bg-slate-900/80 lg:bg-slate-900 px-2.5 py-1 md:px-3 md:py-1.5 rounded-md border border-slate-700 backdrop-blur-md lg:backdrop-blur-none">
+            &larr; Leave Room
           </button>
         </div>
 
