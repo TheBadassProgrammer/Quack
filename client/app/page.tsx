@@ -6,12 +6,18 @@ import { jwtDecode } from "jwt-decode";
 
 export default function Home() {
   const [view, setView] = useState<"home" | "login" | "otp" | "chat">("home");
+  const [authMode, setAuthMode] = useState<"college" | "global">("college");
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
   const [domain, setDomain] = useState("");
   const [status, setStatus] = useState("Idle");
   
+  // Persistent DB User IDs & Friendship
+  const [myUserId, setMyUserId] = useState<string | null>(null);
+  const [peerUserId, setPeerUserId] = useState<string | null>(null);
+  const [friendState, setFriendState] = useState<"none" | "sent" | "received" | "friends">("none");
+
   const [messages, setMessages] = useState<{sender: "me" | "peer", text: string}[]>([]);
   const [chatInput, setChatInput] = useState("");
 
@@ -25,51 +31,101 @@ export default function Home() {
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const localStream = useRef<MediaStream | null>(null);
 
+  // Restore session from localStorage and auto-re-register on socket connection
   useEffect(() => {
     const savedDomain = localStorage.getItem("quack_domain");
-    if (savedDomain) {
+    const savedUserId = localStorage.getItem("quack_userId");
+    const savedEmail = localStorage.getItem("quack_email");
+    const savedAuthMode = localStorage.getItem("quack_authMode") as "college" | "global";
+
+    if (savedDomain && savedUserId && savedEmail) {
       setDomain(savedDomain);
+      setMyUserId(savedUserId);
+      setEmail(savedEmail);
+      if (savedAuthMode) setAuthMode(savedAuthMode);
       setView("chat");
     }
+    
     socket.current = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:3001");
+
+    socket.current.on("connect", () => {
+      if (savedEmail && savedDomain) {
+        socket.current?.emit("register_user", { email: savedEmail, domain: savedDomain }, (res: { userId: string }) => {
+          if (res?.userId) {
+            localStorage.setItem("quack_userId", res.userId);
+            setMyUserId(res.userId);
+          }
+        });
+      }
+    });
+
+    socket.current.on("otp_error", ({ error }: { error: string }) => {
+      setError(error);
+    });
+
     return () => { socket.current?.disconnect(); };
   }, []);
+
+  // Transmit identity as soon as data channel opens & myUserId is ready
+  useEffect(() => {
+    if (myUserId && dataChannel.current && dataChannel.current.readyState === "open") {
+      dataChannel.current.send(JSON.stringify({ type: "IDENTITY", userId: myUserId }));
+    }
+  }, [myUserId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // --- AUTH HANDLERS ---
   const handleGoogleSuccess = (credentialResponse: any) => {
     if (credentialResponse.credential) {
       const decoded: any = jwtDecode(credentialResponse.credential);
-      const parts = decoded.email.split("@");
+      const userEmail = decoded.email;
+      const parts = userEmail.split("@");
       
-      if (parts.length !== 2 || (!parts[1].endsWith(".edu") && !parts[1].endsWith(".ac.in"))) {
-        setError("Please use a valid college Google account (.edu or .ac.in)");
-        return;
+      if (authMode === "college") {
+        if (parts.length !== 2 || (!parts[1].endsWith(".edu") && !parts[1].endsWith(".ac.in"))) {
+          setError("Please use a valid college Google account (.edu or .ac.in)");
+          return;
+        }
       }
       
       setError("");
-      const userDomain = parts[1].toLowerCase();
-      localStorage.setItem("quack_domain", userDomain);
-      setDomain(userDomain);
-      setView("chat");
+      const userDomain = authMode === "global" ? "global" : parts[1].toLowerCase();
+
+      socket.current?.emit("register_user", { email: userEmail, domain: userDomain }, (res: { userId: string }) => {
+        if (res?.userId) {
+          localStorage.setItem("quack_email", userEmail);
+          localStorage.setItem("quack_domain", userDomain);
+          localStorage.setItem("quack_userId", res.userId);
+          localStorage.setItem("quack_authMode", authMode);
+          
+          setDomain(userDomain);
+          setMyUserId(res.userId);
+          setView("chat");
+        } else {
+          setError("Failed to register user in database.");
+        }
+      });
     }
   };
 
   const handleRequestOtp = (e: React.FormEvent) => {
     e.preventDefault();
     const parts = email.split("@");
-    if (parts.length !== 2 || (!parts[1].endsWith(".edu") && !parts[1].endsWith(".ac.in"))) {
-      setError("Please use a valid college email (.edu or .ac.in)");
-      return;
+    if (authMode === "college") {
+      if (parts.length !== 2 || (!parts[1].endsWith(".edu") && !parts[1].endsWith(".ac.in"))) {
+        setError("Please use a valid college email (.edu or .ac.in)");
+        return;
+      }
     }
     if (!socket.current?.connected) {
       setError("Connecting to server... Please wait a few seconds and try again.");
       return;
     }
     setError("");
-    socket.current?.emit("request_otp", { email });
+    socket.current?.emit("request_otp", { email, mode: authMode });
     socket.current?.once("otp_sent", () => setView("otp"));
   };
 
@@ -78,9 +134,22 @@ export default function Home() {
     socket.current?.emit("verify_otp", { email, code: otp });
     socket.current?.once("otp_verified", (res: { success: boolean; domain?: string; error?: string }) => {
       if (res.success && res.domain) {
-        localStorage.setItem("quack_domain", res.domain);
-        setDomain(res.domain);
-        setView("chat");
+        const userDomain = authMode === "global" ? "global" : res.domain;
+
+        socket.current?.emit("register_user", { email, domain: userDomain }, (ackRes: { userId: string }) => {
+          if (ackRes?.userId) {
+            localStorage.setItem("quack_email", email);
+            localStorage.setItem("quack_domain", userDomain);
+            localStorage.setItem("quack_userId", ackRes.userId);
+            localStorage.setItem("quack_authMode", authMode);
+            
+            setDomain(userDomain);
+            setMyUserId(ackRes.userId);
+            setView("chat");
+          } else {
+            setError("Failed to register user in database.");
+          }
+        });
       } else {
         setError(res.error || "Invalid OTP");
       }
@@ -89,7 +158,11 @@ export default function Home() {
 
   const handleLogout = () => {
     localStorage.removeItem("quack_domain");
+    localStorage.removeItem("quack_userId");
+    localStorage.removeItem("quack_email");
+    localStorage.removeItem("quack_authMode");
     setDomain("");
+    setMyUserId(null);
     setView("home");
     setEmail("");
     setOtp("");
@@ -97,6 +170,46 @@ export default function Home() {
     dataChannel.current = null;
     if (remoteVideo.current) remoteVideo.current.srcObject = null;
     pc.current?.close();
+  };
+
+  // --- WEBRTC & FRIEND HANDSHAKE ---
+  const handleDataChannelMessage = (dataString: string) => {
+    try {
+      const payload = JSON.parse(dataString);
+      
+      if (payload.type === "IDENTITY") {
+        setPeerUserId(payload.userId);
+      } else if (payload.type === "CHAT") {
+        setMessages((prev) => [...prev, { sender: "peer", text: payload.text }]);
+      } else if (payload.type === "FRIEND_REQUEST") {
+        setFriendState((prev) => {
+          if (prev === "sent") {
+            if (myUserId && payload.userId) {
+              socket.current?.emit("add_friend", { myId: myUserId, peerId: payload.userId });
+            }
+            return "friends";
+          }
+          return "received";
+        });
+      }
+    } catch {
+      setMessages((prev) => [...prev, { sender: "peer", text: dataString }]);
+    }
+  };
+
+  const handleAddFriendClick = () => {
+    if (!myUserId || !peerUserId) return;
+
+    if (friendState === "friends" || friendState === "sent") return;
+
+    const nextState = friendState === "received" ? "friends" : "sent";
+    setFriendState(nextState);
+
+    dataChannel.current?.send(JSON.stringify({ type: "FRIEND_REQUEST", userId: myUserId }));
+
+    if (nextState === "friends" && myUserId && peerUserId) {
+      socket.current?.emit("add_friend", { myId: myUserId, peerId: peerUserId });
+    }
   };
 
   useEffect(() => {
@@ -128,9 +241,12 @@ export default function Home() {
       };
 
       peer.ondatachannel = (event) => {
-        const receiveChannel = event.channel;
-        receiveChannel.onmessage = (e) => setMessages((prev) => [...prev, { sender: "peer", text: e.data }]);
-        dataChannel.current = receiveChannel;
+        const dc = event.channel;
+        dc.onopen = () => {
+          if (myUserId) dc.send(JSON.stringify({ type: "IDENTITY", userId: myUserId }));
+        };
+        dc.onmessage = (e) => handleDataChannelMessage(e.data);
+        dataChannel.current = dc;
       };
 
       pc.current = peer;
@@ -141,12 +257,17 @@ export default function Home() {
       currentRoom.current = roomId;
       setStatus("Connected");
       setMessages([]);
+      setFriendState("none");
+      setPeerUserId(null);
       
       const peer = createPeerConnection();
 
       if (initiate) {
         const dc = peer.createDataChannel("chat");
-        dc.onmessage = (e) => setMessages((prev) => [...prev, { sender: "peer", text: e.data }]);
+        dc.onopen = () => {
+          if (myUserId) dc.send(JSON.stringify({ type: "IDENTITY", userId: myUserId }));
+        };
+        dc.onmessage = (e) => handleDataChannelMessage(e.data);
         dataChannel.current = dc;
 
         const offer = await peer.createOffer();
@@ -181,11 +302,13 @@ export default function Home() {
       socket.current?.off("webrtc_signal", onSignal);
       pc.current?.close();
     };
-  }, [view]);
+  }, [view, myUserId]);
 
   const handleFindMatch = () => {
     setStatus("Searching...");
     setMessages([]);
+    setFriendState("none");
+    setPeerUserId(null);
     if (remoteVideo.current) remoteVideo.current.srcObject = null;
     if (pc.current) {
       pc.current.close();
@@ -197,7 +320,8 @@ export default function Home() {
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || !dataChannel.current || dataChannel.current.readyState !== "open") return;
-    dataChannel.current.send(chatInput);
+    
+    dataChannel.current.send(JSON.stringify({ type: "CHAT", text: chatInput }));
     setMessages((prev) => [...prev, { sender: "me", text: chatInput }]);
     setChatInput("");
   };
@@ -209,15 +333,23 @@ export default function Home() {
           <div className="flex flex-col items-center gap-2 mb-4">
             <span className="text-6xl mb-2">🦆</span>
             <h1 className="text-5xl font-black tracking-tight text-amber-400">Quack</h1>
-            <p className="text-slate-400 text-center text-sm">Choose your connection mode.</p>
+            <p className="text-slate-400 text-center text-sm">Choose how you want to connect.</p>
           </div>
-          <button onClick={() => { setDomain("global"); setView("chat"); }} className="w-full py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-2xl flex flex-col items-center justify-center gap-1 transition">
-            <span className="font-bold text-lg text-white">Start Talking</span>
-            <span className="text-xs text-slate-400">Talk to anyone in the world. No login required.</span>
+          
+          <button 
+            onClick={() => { setAuthMode("global"); setView("login"); }} 
+            className="w-full py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-2xl flex flex-col items-center justify-center gap-1 transition shadow-lg"
+          >
+            <span className="font-bold text-lg text-white">Global Chat</span>
+            <span className="text-xs text-slate-400">Log in with any email to talk worldwide.</span>
           </button>
-          <button onClick={() => setView("login")} className="w-full py-4 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-2xl flex flex-col items-center justify-center gap-1 transition shadow-lg shadow-amber-400/20">
-            <span className="font-bold text-lg">Talk to a College Peer</span>
-            <span className="text-xs text-slate-800 font-medium">Verify your university email to join.</span>
+
+          <button 
+            onClick={() => { setAuthMode("college"); setView("login"); }} 
+            className="w-full py-4 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-2xl flex flex-col items-center justify-center gap-1 transition shadow-lg shadow-amber-400/20"
+          >
+            <span className="font-bold text-lg">College Peer Chat</span>
+            <span className="text-xs text-slate-800 font-medium">Verify your university email (.edu / .ac.in).</span>
           </button>
         </div>
       </main>
@@ -231,7 +363,9 @@ export default function Home() {
           <button onClick={() => setView("home")} className="absolute top-4 left-4 text-slate-400 hover:text-white text-sm">&larr; Back</button>
           <div className="flex items-center justify-center gap-3 mb-6 mt-4">
             <span className="text-4xl">🦆</span>
-            <h2 className="text-2xl font-black tracking-tight text-amber-400">{view === "login" ? "College Peers" : "Verify Email"}</h2>
+            <h2 className="text-2xl font-black tracking-tight text-amber-400">
+              {authMode === "college" ? "College Peer Chat" : "Global Chat Login"}
+            </h2>
           </div>
           
           {view === "login" ? (
@@ -247,7 +381,14 @@ export default function Home() {
                 <div className="h-px bg-slate-800 flex-1"></div>
               </div>
               <form onSubmit={handleRequestOtp} className="flex flex-col gap-4">
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourcollege.edu" required className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 text-sm" />
+                <input 
+                  type="email" 
+                  value={email} 
+                  onChange={(e) => setEmail(e.target.value)} 
+                  placeholder={authMode === "college" ? "you@yourcollege.edu" : "you@email.com"} 
+                  required 
+                  className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 text-sm" 
+                />
                 {error && <p className="text-red-400 text-xs text-center">{error}</p>}
                 <button type="submit" className="w-full py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl transition">Send Code</button>
               </form>
@@ -276,16 +417,31 @@ export default function Home() {
             <span className="font-bold text-amber-400 text-lg md:text-xl hidden sm:block drop-shadow-md lg:drop-shadow-none">Quack</span>
           </div>
           <button onClick={handleLogout} className="text-[10px] md:text-xs text-slate-200 lg:text-slate-400 hover:text-white bg-slate-900/80 lg:bg-slate-900 px-2 py-1 md:px-3 md:py-1.5 rounded-md border border-slate-700 backdrop-blur-md lg:backdrop-blur-none">
-            {domain === "global" ? "Leave Room" : "Log Out"}
+            Log Out
           </button>
         </div>
-        <div className="flex items-center gap-2 md:gap-4 pointer-events-auto">
+
+        <div className="flex items-center gap-2 md:gap-3 pointer-events-auto">
+          {status === "Connected" && (
+            <button 
+              onClick={handleAddFriendClick}
+              className={`px-3 py-1.5 text-[11px] md:text-xs font-bold rounded-full transition shadow-lg ${
+                friendState === "friends"
+                  ? "bg-green-500 text-slate-950 cursor-default"
+                  : friendState === "sent"
+                  ? "bg-slate-700 text-amber-400 border border-amber-400/50"
+                  : friendState === "received"
+                  ? "bg-amber-400 text-slate-950 animate-pulse"
+                  : "bg-slate-800 hover:bg-slate-700 text-white border border-slate-700"
+              }`}
+            >
+              {friendState === "friends" ? "✓ Friends" : friendState === "sent" ? "Request Sent" : friendState === "received" ? "Accept Friend" : "+ Add Friend"}
+            </button>
+          )}
+
           <button onClick={handleFindMatch} className="px-4 py-1.5 md:px-6 md:py-1.5 text-[11px] md:text-sm bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-full transition shadow-lg shadow-amber-400/20">
             Next Peer
           </button>
-          <span className="text-[9px] md:text-xs font-mono bg-slate-900/80 lg:bg-slate-800 px-2 py-1 md:px-3 md:py-1.5 rounded-full text-slate-200 lg:text-slate-300 border border-slate-700 uppercase tracking-wider hidden md:block backdrop-blur-md lg:backdrop-blur-none">
-            {domain === "global" ? "Global" : `Campus: ${domain}`}
-          </span>
         </div>
       </header>
 
@@ -315,7 +471,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* CHAT AREA: Changed h-[60%] to h-[30%] on mobile */}
+        {/* CHAT AREA */}
         <div className="absolute bottom-0 left-0 w-full h-[30%] lg:h-full lg:static z-30 flex flex-col justify-end lg:justify-start bg-gradient-to-t from-black/90 via-black/40 to-transparent pointer-events-none lg:pointer-events-auto lg:w-80 xl:w-96 shrink-0 lg:bg-none lg:bg-slate-900 lg:border lg:border-slate-800 lg:rounded-2xl lg:shadow-2xl lg:overflow-hidden">
           
           <div className="hidden lg:flex p-3 md:p-4 bg-slate-950/50 border-b border-slate-800 justify-between items-center shrink-0">
@@ -327,7 +483,6 @@ export default function Home() {
           
           {/* Scrollable Messages Area */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 lg:p-4 flex flex-col gap-1.5 lg:gap-3 w-full pointer-events-auto no-scrollbar mask-image-to-top">
-            
             {messages.map((m, i) => (
               <div key={i} className={`flex w-full lg:w-fit lg:max-w-[85%] ${m.sender === "me" ? "lg:self-end" : "lg:self-start"}`}>
                 
@@ -352,7 +507,6 @@ export default function Home() {
 
               </div>
             ))}
-            
             <div ref={messagesEndRef} className="h-px shrink-0" />
           </div>
 
