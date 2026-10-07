@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  domain    String
+  createdAt DateTime @default(now())
+
+  // Relations for Direct Messages
+  sentMessages     Message[] @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+
+  // Relations for Friendships (A user can be either UserA or UserB in the pair)
+  friendshipsInitiated Friendship[] @relation("UserA")
+  friendshipsReceived  Friendship[] @relation("UserB")
+}
+
+model Friendship {
+  id        String   @id @default(uuid())
+  userAId   String
+  userBId   String
+  createdAt DateTime @default(now())
+
+  userA User @relation("UserA", fields: [userAId], references: [id])
+  userB User @relation("UserB", fields: [userBId], references: [id])
+
+  // Ensures UserA and UserB can only be friends once
+  @@unique([userAId, userBId])
+}
+
+model Message {
+  id         String   @id @default(uuid())
+  text       String
+  senderId   String
+  receiverId String
+  createdAt  DateTime @default(now())
+
+  sender   User @relation("SentMessages", fields: [senderId], references: [id])
+  receiver User @relation("ReceivedMessages", fields: [receiverId], references: [id])
+}
